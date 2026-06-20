@@ -71,6 +71,13 @@ mod cli {
                 poll,
                 topic,
             } => {
+                if !(contract.starts_with('C') && contract.len() == 56) {
+                    eprintln!(
+                        "Error: Contract ID must start with 'C' and be 56 characters — got: {}",
+                        contract
+                    );
+                    std::process::exit(1);
+                }
                 let net = match network.to_lowercase().as_str() {
                     "mainnet" => Network::Mainnet,
                     "futurenet" => Network::Futurenet,
