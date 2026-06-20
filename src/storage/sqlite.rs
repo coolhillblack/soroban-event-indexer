@@ -84,6 +84,23 @@ impl SqliteStorage {
             Ok(None)
         }
     }
+
+    /// Returns the ledger sequence of the most recently stored event, if any.
+    /// Use this (not `latest_cursor`) to resume an indexer via
+    /// `IndexerConfig.start_ledger`, since RPC's pagination cursor doesn't
+    /// map back to a ledger number — but the ledger we already stored does.
+    pub fn latest_ledger(&self) -> Result<Option<u32>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt =
+            conn.prepare("SELECT ledger FROM soroban_events ORDER BY ledger DESC LIMIT 1")?;
+        let mut rows = stmt.query([])?;
+        if let Some(row) = rows.next()? {
+            let ledger: i64 = row.get(0)?;
+            Ok(Some(ledger as u32))
+        } else {
+            Ok(None)
+        }
+    }
 }
 
 impl EventStorage for SqliteStorage {
