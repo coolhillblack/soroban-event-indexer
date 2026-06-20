@@ -1,0 +1,3 @@
+# Using rustfmt defaults. This file exists to signal formatting conventions
+# and ensure `cargo fmt --check` is enforceable in CI.
+edition = "2021"
