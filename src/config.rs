@@ -129,3 +129,121 @@ impl IndexerConfig {
         self
     }
 }
+
+impl IndexerConfig {
+    /// Builds an `IndexerConfig` from environment variables — useful for
+    /// containerized or CLI deployments that prefer env-based config over
+    /// hardcoding values in source.
+    ///
+    /// Recognized variables:
+    /// - `CONTRACT_ID` (**required**) — the Soroban contract ID to watch.
+    /// - `STELLAR_NETWORK` (optional, default: `testnet`) — one of
+    ///   `mainnet`, `testnet`, `futurenet`, or any other value, which is
+    ///   treated as a custom RPC URL.
+    /// - `START_LEDGER` (optional, default: auto-detect) — ledger sequence
+    ///   number to start polling from. If unset, the indexer starts from
+    ///   roughly 7 days before the latest ledger (see [`EventIndexer::watch`]).
+    /// - `POLL_INTERVAL_SECS` (optional, default: `6`) — seconds between polls.
+    ///
+    /// # Errors
+    /// Returns an error if `CONTRACT_ID` is missing, or if `START_LEDGER` /
+    /// `POLL_INTERVAL_SECS` are set but fail to parse as integers.
+    pub fn from_env() -> crate::error::Result<Self> {
+        use crate::error::IndexerError;
+
+        let contract_id = std::env::var("CONTRACT_ID").map_err(|_| {
+            IndexerError::Config("CONTRACT_ID environment variable is required".to_string())
+        })?;
+
+        let network = match std::env::var("STELLAR_NETWORK") {
+            Ok(value) => match value.to_lowercase().as_str() {
+                "mainnet" => Network::Mainnet,
+                "testnet" => Network::Testnet,
+                "futurenet" => Network::Futurenet,
+                _ => Network::Custom(value),
+            },
+            Err(_) => Network::Testnet,
+        };
+
+        let start_ledger = match std::env::var("START_LEDGER") {
+            Ok(value) => Some(value.parse::<u32>().map_err(|e| {
+                IndexerError::Config(format!("invalid START_LEDGER ({value:?}): {e}"))
+            })?),
+            Err(_) => None,
+        };
+
+        let poll_interval = match std::env::var("POLL_INTERVAL_SECS") {
+            Ok(value) => {
+                let secs = value.parse::<u64>().map_err(|e| {
+                    IndexerError::Config(format!("invalid POLL_INTERVAL_SECS ({value:?}): {e}"))
+                })?;
+                PollInterval::Seconds(secs)
+            }
+            Err(_) => PollInterval::default(),
+        };
+
+        Ok(IndexerConfig {
+            contract_id,
+            network,
+            start_ledger,
+            poll_interval,
+            max_events_per_poll: 100,
+        })
+    }
+}
+
+#[cfg(test)]
+mod from_env_tests {
+    use super::*;
+    use serial_test::serial;
+
+    fn clear_env() {
+        std::env::remove_var("CONTRACT_ID");
+        std::env::remove_var("STELLAR_NETWORK");
+        std::env::remove_var("START_LEDGER");
+        std::env::remove_var("POLL_INTERVAL_SECS");
+    }
+
+    #[test]
+    #[serial]
+    fn builds_with_defaults() {
+        clear_env();
+        std::env::set_var("CONTRACT_ID", "CTESTCONTRACTID");
+
+        let config = IndexerConfig::from_env().expect("should build config");
+
+        assert_eq!(config.contract_id, "CTESTCONTRACTID");
+        assert_eq!(config.network, Network::Testnet);
+        assert_eq!(config.start_ledger, None);
+        assert!(matches!(config.poll_interval, PollInterval::Seconds(6)));
+
+        clear_env();
+    }
+
+    #[test]
+    #[serial]
+    fn reads_all_overrides() {
+        clear_env();
+        std::env::set_var("CONTRACT_ID", "CTESTCONTRACTID");
+        std::env::set_var("STELLAR_NETWORK", "mainnet");
+        std::env::set_var("START_LEDGER", "199616");
+        std::env::set_var("POLL_INTERVAL_SECS", "10");
+
+        let config = IndexerConfig::from_env().expect("should build config");
+
+        assert_eq!(config.network, Network::Mainnet);
+        assert_eq!(config.start_ledger, Some(199_616));
+        assert!(matches!(config.poll_interval, PollInterval::Seconds(10)));
+
+        clear_env();
+    }
+
+    #[test]
+    #[serial]
+    fn errors_without_contract_id() {
+        clear_env();
+        let result = IndexerConfig::from_env();
+        assert!(result.is_err());
+        clear_env();
+    }
+}

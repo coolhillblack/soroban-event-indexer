@@ -5,6 +5,7 @@ use std::sync::Arc;
 
 use chrono::DateTime;
 use tracing::{debug, error, info, warn};
+use tracing::Instrument;
 
 use crate::config::IndexerConfig;
 use crate::error::{IndexerError, Result};
@@ -119,52 +120,59 @@ impl EventIndexer {
                 return Ok(());
             }
 
-            let params = GetEventsParams {
-                start_ledger: current_ledger,
-                filters: vec![RpcEventFilter {
-                    event_type: "contract".to_string(),
-                    contract_ids: vec![self.config.contract_id.clone()],
-                    topics: vec![],
-                }],
-                pagination: PaginationOptions {
-                    limit: self.config.max_events_per_poll,
-                },
-            };
+            let poll_span = tracing::info_span!("poll", ledger = current_ledger);
+            let poll_result = poll_span.in_scope(|| -> Result<()> {
+                let params = GetEventsParams {
+                    start_ledger: current_ledger,
+                    filters: vec![RpcEventFilter {
+                        event_type: "contract".to_string(),
+                        contract_ids: vec![self.config.contract_id.clone()],
+                        topics: vec![],
+                    }],
+                    pagination: PaginationOptions {
+                        limit: self.config.max_events_per_poll,
+                    },
+                };
 
-            match client.get_events(params) {
-                Ok(response) => {
-                    let latest = response.latest_ledger;
-                    debug!(
-                        "RPC returned {} events, latest_ledger={}",
-                        response.events.len(),
-                        latest
-                    );
+                match client.get_events(params) {
+                    Ok(response) => {
+                        let latest = response.latest_ledger;
+                        debug!(
+                            "RPC returned {} events, latest_ledger={}",
+                            response.events.len(),
+                            latest
+                        );
 
-                    for raw_event in response.events {
-                        let event = decode_event(raw_event);
+                        for raw_event in response.events {
+                            let event = decode_event(raw_event);
 
-                        let passes = self
-                            .filter
-                            .as_ref()
-                            .map(|f| f.matches(&event))
-                            .unwrap_or(true);
+                            let passes = self
+                                .filter
+                                .as_ref()
+                                .map(|f| f.matches(&event))
+                                .unwrap_or(true);
 
-                        if passes {
-                            handler(event)?;
+                            if passes {
+                                handler(event)?;
+                            }
+                        }
+
+                        if latest > current_ledger {
+                            current_ledger = latest;
                         }
                     }
-
-                    if latest > current_ledger {
-                        current_ledger = latest;
+                    Err(IndexerError::RpcError { code, message }) => {
+                        warn!("RPC error (will retry): code={code} message={message}");
+                    }
+                    Err(e) => {
+                        error!("Transport error (will retry): {e}");
                     }
                 }
-                Err(IndexerError::RpcError { code, message }) => {
-                    warn!("RPC error (will retry): code={code} message={message}");
-                }
-                Err(e) => {
-                    error!("Transport error (will retry): {e}");
-                }
-            }
+
+                Ok(())
+            });
+
+            poll_result?;
 
             std::thread::sleep(self.config.poll_interval.as_duration());
         }
