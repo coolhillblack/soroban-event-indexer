@@ -223,3 +223,53 @@ impl StopHandle {
         self.0.store(true, Ordering::SeqCst);
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn first_failure_uses_base_interval() {
+        let base = Duration::from_secs(5);
+        assert_eq!(backoff_delay(base, 1), Duration::from_secs(5));
+    }
+
+    #[test]
+    fn backoff_doubles_each_attempt() {
+        let base = Duration::from_secs(2);
+        assert_eq!(backoff_delay(base, 1), Duration::from_secs(2));
+        assert_eq!(backoff_delay(base, 2), Duration::from_secs(4));
+        assert_eq!(backoff_delay(base, 3), Duration::from_secs(8));
+        assert_eq!(backoff_delay(base, 4), Duration::from_secs(16));
+    }
+
+    #[test]
+    fn backoff_never_exceeds_cap() {
+        let base = Duration::from_secs(5);
+        // Even after many consecutive failures, we should never wait
+        // longer than MAX_BACKOFF_SECS.
+        for attempt in 1..=20 {
+            let delay = backoff_delay(base, attempt);
+            assert!(
+                delay.as_secs() <= MAX_BACKOFF_SECS,
+                "attempt {attempt} produced delay {delay:?}, exceeding cap"
+            );
+        }
+    }
+
+    #[test]
+    fn sub_second_poll_interval_still_backs_off() {
+        // A poll interval under 1 second shouldn't produce a zero-second
+        // backoff; we floor the base at 1 second before multiplying.
+        let base = Duration::from_millis(200);
+        assert_eq!(backoff_delay(base, 1), Duration::from_secs(1));
+        assert_eq!(backoff_delay(base, 2), Duration::from_secs(2));
+    }
+
+    #[test]
+    fn zero_attempt_behaves_like_first_attempt() {
+        // Defensive: attempt=0 shouldn't panic or underflow.
+        let base = Duration::from_secs(3);
+        assert_eq!(backoff_delay(base, 0), Duration::from_secs(3));
+    }
+}
