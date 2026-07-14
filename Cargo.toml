@@ -46,3 +46,6 @@ rusqlite = { version = "0.29", features = ["bundled"], optional = true }
 
 # Optional: CLI
 clap = { version = "4", features = ["derive"], optional = true }
+
+[dev-dependencies]
+     serial_test = "3"

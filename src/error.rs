@@ -10,6 +10,9 @@ pub enum IndexerError {
     #[error("RPC returned error response: code={code}, message={message}")]
     RpcError { code: i64, message: String },
 
+    #[error("invalid configuration: {0}")]
+    Config(String),
+
     #[error("I/O error: {0}")]
     Io(#[from] std::io::Error),
 

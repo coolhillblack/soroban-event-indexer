@@ -39,6 +39,38 @@ soroban-event-indexer = { version = "0.1", default-features = false }
 
 ## Usage
 
+### Configuring via environment variables
+
+`IndexerConfig` can also be built from environment variables, useful for
+containerized or CLI deployments:
+
+```rust
+let config = IndexerConfig::from_env()?;
+```
+
+Recognized variables:
+
+| Variable             | Required | Default     | Description                                  |
+|-----------------------|----------|-------------|-----------------------------------------------|
+| `CONTRACT_ID`         | yes      | —           | Soroban contract ID to watch                  |
+| `STELLAR_NETWORK`     | no       | `testnet`   | `mainnet`, `testnet`, `futurenet`, or a custom RPC URL |
+| `START_LEDGER`        | no       | auto-detect | Ledger sequence to start polling from         |
+| `POLL_INTERVAL_SECS`  | no       | `6`         | Seconds between polls                         |
+
+### Resuming after a restart
+
+See `examples/resumable_indexer.rs` for a full working example. The short
+version: on startup, call `SqliteStorage::latest_ledger()` to get the
+ledger sequence of the last event you stored, and pass it to
+`IndexerConfig::start_ledger()`. The indexer may re-fetch events from that
+ledger, but `soroban_events.id` is UNIQUE and writes use `INSERT OR
+IGNORE`, so re-processing is safe — no duplicates, no lost events.
+
+Note: `SqliteStorage::latest_cursor()` returns the RPC paging token rather
+than a ledger number, and isn't currently usable for resuming — `getEvents`
+pagination doesn't accept a raw ledger as a cursor input, so it can't be
+translated back. `latest_ledger()` is the correct method for this purpose.
+
 ### Pattern 1 — Watch with a callback
 
 ```rust
