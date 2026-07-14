@@ -5,7 +5,7 @@ use thiserror::Error;
 #[derive(Error, Debug)]
 pub enum IndexerError {
     #[error("RPC request failed: {0}")]
-    Rpc(#[from] ureq::Error),
+    Rpc(Box<ureq::Error>),
 
     #[error("RPC returned error response: code={code}, message={message}")]
     RpcError { code: i64, message: String },
@@ -37,3 +37,9 @@ pub enum IndexerError {
 }
 
 pub type Result<T> = std::result::Result<T, IndexerError>;
+
+impl From<ureq::Error> for IndexerError {
+    fn from(err: ureq::Error) -> Self {
+        IndexerError::Rpc(Box::new(err))
+    }
+}

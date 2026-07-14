@@ -138,7 +138,7 @@ impl RpcClient {
         };
 
         let resp: JsonRpcResponse<GetEventsResponse> = ureq::post(&self.rpc_url)
-            .send_json(serde_json::to_value(&req)?)?
+            .send_json(serde_json::to_value(req)?)?
             .into_json()?;
 
         if let Some(err) = resp.error {

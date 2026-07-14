@@ -2,6 +2,7 @@
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::time::Duration;
 
 use chrono::DateTime;
 use tracing::{debug, error, info, warn};
@@ -9,9 +10,12 @@ use tracing::Instrument;
 
 use crate::config::IndexerConfig;
 use crate::error::{IndexerError, Result};
-use crate::event::{EventFilter, EventKind, IndexedEvent};
-use crate::rpc::{GetEventsParams, PaginationOptions, RpcClient, RpcEventFilter, RpcEventInfo};
-use crate::scval::ScValDecoded;
+use crate::event::{decode_event, EventFilter, IndexedEvent};
+use crate::rpc::{GetEventsParams, PaginationOptions, RpcClient, RpcEventFilter};
+
+/// Cap on exponential backoff after repeated poll errors, so we never
+/// wait longer than this between retries regardless of failure streak.
+const MAX_BACKOFF_SECS: u64 = 60;
 
 /// Seconds of ledger history available via RPC (7 days, conservative estimate)
 const LEDGER_RETENTION_SECS: u32 = 7 * 24 * 3600;
@@ -106,6 +110,7 @@ impl EventIndexer {
         };
 
         let mut current_ledger = start_ledger;
+        let mut consecutive_errors: u32 = 0;
 
         info!(
             contract_id = %self.config.contract_id,
@@ -174,39 +179,41 @@ impl EventIndexer {
 
             poll_result?;
 
-            std::thread::sleep(self.config.poll_interval.as_duration());
+        debug!(
+            "RPC returned {} events, latest_ledger={}",
+            response.events.len(),
+            response.latest_ledger
+        );
+
+        for raw_event in response.events {
+            let event = decode_event(raw_event);
+
+            let passes = self
+                .filter
+                .as_ref()
+                .map(|f| f.matches(&event))
+                .unwrap_or(true);
+
+            if passes {
+                handler(event)?;
+            }
         }
+
+        Ok(response.latest_ledger)
     }
 }
 
-/// Decode a raw RPC event into the rich [`IndexedEvent`] type.
-fn decode_event(raw: RpcEventInfo) -> IndexedEvent {
-    let topics: Vec<ScValDecoded> = raw
-        .topic
-        .iter()
-        .map(|t| ScValDecoded::from_base64(t))
-        .collect();
-
-    let value = ScValDecoded::from_base64(&raw.value);
-
-    let ledger_closed_at = DateTime::parse_from_rfc3339(&raw.ledger_closed_at)
-        .map(|dt| dt.with_timezone(&chrono::Utc))
-        .unwrap_or_else(|_| chrono::Utc::now());
-
-    IndexedEvent {
-        id: raw.id,
-        paging_token: raw.paging_token,
-        contract_id: raw.contract_id,
-        ledger: raw.ledger,
-        ledger_closed_at,
-        tx_hash: raw.tx_hash,
-        kind: EventKind::from(raw.event_type.as_str()),
-        in_successful_call: raw.in_successful_contract_call,
-        raw_topics: raw.topic,
-        raw_value: raw.value,
-        topics,
-        value,
-    }
+/// Compute the delay before the next retry after `attempt` consecutive
+/// failures, doubling each time up to [`MAX_BACKOFF_SECS`].
+///
+/// `attempt` is 1 on the first failure. The base poll interval is used
+/// as the starting point so a fast-polling indexer still backs off
+/// meaningfully instead of hammering a struggling RPC endpoint.
+fn backoff_delay(base: Duration, attempt: u32) -> Duration {
+    let capped_attempt = attempt.min(10); // avoid overflow on the shift
+    let multiplier = 1u64 << capped_attempt.saturating_sub(1);
+    let backoff_secs = base.as_secs().max(1).saturating_mul(multiplier);
+    Duration::from_secs(backoff_secs.min(MAX_BACKOFF_SECS))
 }
 
 /// A handle for cleanly stopping a running indexer from another thread.
@@ -216,5 +223,55 @@ impl StopHandle {
     /// Signal the indexer to stop after its current poll completes.
     pub fn stop(&self) {
         self.0.store(true, Ordering::SeqCst);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn first_failure_uses_base_interval() {
+        let base = Duration::from_secs(5);
+        assert_eq!(backoff_delay(base, 1), Duration::from_secs(5));
+    }
+
+    #[test]
+    fn backoff_doubles_each_attempt() {
+        let base = Duration::from_secs(2);
+        assert_eq!(backoff_delay(base, 1), Duration::from_secs(2));
+        assert_eq!(backoff_delay(base, 2), Duration::from_secs(4));
+        assert_eq!(backoff_delay(base, 3), Duration::from_secs(8));
+        assert_eq!(backoff_delay(base, 4), Duration::from_secs(16));
+    }
+
+    #[test]
+    fn backoff_never_exceeds_cap() {
+        let base = Duration::from_secs(5);
+        // Even after many consecutive failures, we should never wait
+        // longer than MAX_BACKOFF_SECS.
+        for attempt in 1..=20 {
+            let delay = backoff_delay(base, attempt);
+            assert!(
+                delay.as_secs() <= MAX_BACKOFF_SECS,
+                "attempt {attempt} produced delay {delay:?}, exceeding cap"
+            );
+        }
+    }
+
+    #[test]
+    fn sub_second_poll_interval_still_backs_off() {
+        // A poll interval under 1 second shouldn't produce a zero-second
+        // backoff; we floor the base at 1 second before multiplying.
+        let base = Duration::from_millis(200);
+        assert_eq!(backoff_delay(base, 1), Duration::from_secs(1));
+        assert_eq!(backoff_delay(base, 2), Duration::from_secs(2));
+    }
+
+    #[test]
+    fn zero_attempt_behaves_like_first_attempt() {
+        // Defensive: attempt=0 shouldn't panic or underflow.
+        let base = Duration::from_secs(3);
+        assert_eq!(backoff_delay(base, 0), Duration::from_secs(3));
     }
 }

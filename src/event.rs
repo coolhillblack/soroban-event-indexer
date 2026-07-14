@@ -1,5 +1,6 @@
 //! The core [`IndexedEvent`] type and associated filter types.
 
+use crate::rpc::RpcEventInfo;
 use crate::scval::ScValDecoded;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -84,6 +85,36 @@ impl IndexedEvent {
         self.topics.first().is_some_and(|t| {
             matches!(t, ScValDecoded::Symbol(s) | ScValDecoded::String(s) if s == name)
         })
+    }
+}
+
+/// Decode a raw RPC event into the rich [`IndexedEvent`] type.
+pub(crate) fn decode_event(raw: RpcEventInfo) -> IndexedEvent {
+    let topics: Vec<ScValDecoded> = raw
+        .topic
+        .iter()
+        .map(|t| ScValDecoded::from_base64(t))
+        .collect();
+
+    let value = ScValDecoded::from_base64(&raw.value);
+
+    let ledger_closed_at = DateTime::parse_from_rfc3339(&raw.ledger_closed_at)
+        .map(|dt| dt.with_timezone(&Utc))
+        .unwrap_or_else(|_| Utc::now());
+
+    IndexedEvent {
+        id: raw.id,
+        paging_token: raw.paging_token,
+        contract_id: raw.contract_id,
+        ledger: raw.ledger,
+        ledger_closed_at,
+        tx_hash: raw.tx_hash,
+        kind: EventKind::from(raw.event_type.as_str()),
+        in_successful_call: raw.in_successful_contract_call,
+        raw_topics: raw.topic,
+        raw_value: raw.value,
+        topics,
+        value,
     }
 }
 
