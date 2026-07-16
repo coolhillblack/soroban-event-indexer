@@ -4,12 +4,10 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
-use chrono::DateTime;
-use tracing::{debug, error, info, warn};
-use tracing::Instrument;
+use tracing::{debug, info, warn};
 
 use crate::config::IndexerConfig;
-use crate::error::{IndexerError, Result};
+use crate::error::Result;
 use crate::event::{decode_event, EventFilter, IndexedEvent};
 use crate::rpc::{GetEventsParams, PaginationOptions, RpcClient, RpcEventFilter};
 
@@ -126,7 +124,7 @@ impl EventIndexer {
             }
 
             let poll_span = tracing::info_span!("poll", ledger = current_ledger);
-            let poll_result = poll_span.in_scope(|| -> Result<()> {
+            let poll_result = poll_span.in_scope(|| -> Result<u32> {
                 let params = GetEventsParams {
                     start_ledger: current_ledger,
                     filters: vec![RpcEventFilter {
@@ -139,67 +137,49 @@ impl EventIndexer {
                     },
                 };
 
-                match client.get_events(params) {
-                    Ok(response) => {
-                        let latest = response.latest_ledger;
-                        debug!(
-                            "RPC returned {} events, latest_ledger={}",
-                            response.events.len(),
-                            latest
-                        );
+                let response = client.get_events(params)?;
 
-                        for raw_event in response.events {
-                            let event = decode_event(raw_event);
+                debug!(
+                    "RPC returned {} events, latest_ledger={}",
+                    response.events.len(),
+                    response.latest_ledger
+                );
 
-                            let passes = self
-                                .filter
-                                .as_ref()
-                                .map(|f| f.matches(&event))
-                                .unwrap_or(true);
+                for raw_event in response.events {
+                    let event = decode_event(raw_event);
 
-                            if passes {
-                                handler(event)?;
-                            }
-                        }
+                    let passes = self
+                        .filter
+                        .as_ref()
+                        .map(|f| f.matches(&event))
+                        .unwrap_or(true);
 
-                        if latest > current_ledger {
-                            current_ledger = latest;
-                        }
-                    }
-                    Err(IndexerError::RpcError { code, message }) => {
-                        warn!("RPC error (will retry): code={code} message={message}");
-                    }
-                    Err(e) => {
-                        error!("Transport error (will retry): {e}");
+                    if passes {
+                        handler(event)?;
                     }
                 }
 
-                Ok(())
+                Ok(response.latest_ledger)
             });
 
-            poll_result?;
-
-        debug!(
-            "RPC returned {} events, latest_ledger={}",
-            response.events.len(),
-            response.latest_ledger
-        );
-
-        for raw_event in response.events {
-            let event = decode_event(raw_event);
-
-            let passes = self
-                .filter
-                .as_ref()
-                .map(|f| f.matches(&event))
-                .unwrap_or(true);
-
-            if passes {
-                handler(event)?;
+            match poll_result {
+                Ok(latest) => {
+                    consecutive_errors = 0;
+                    if latest > current_ledger {
+                        current_ledger = latest;
+                    }
+                    std::thread::sleep(self.config.poll_interval.as_duration());
+                }
+                Err(e) => {
+                    consecutive_errors += 1;
+                    warn!("Poll failed (attempt {consecutive_errors}, will retry): {e}");
+                    std::thread::sleep(backoff_delay(
+                        self.config.poll_interval.as_duration(),
+                        consecutive_errors,
+                    ));
+                }
             }
         }
-
-        Ok(response.latest_ledger)
     }
 }
 

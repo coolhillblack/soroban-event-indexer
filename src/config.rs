@@ -144,10 +144,13 @@ impl IndexerConfig {
     ///   number to start polling from. If unset, the indexer starts from
     ///   roughly 7 days before the latest ledger (see [`EventIndexer::watch`]).
     /// - `POLL_INTERVAL_SECS` (optional, default: `6`) — seconds between polls.
+    /// - `MAX_EVENTS_PER_POLL` (optional, default: `100`) — max events fetched
+    ///   per RPC round-trip, clamped to the range `1..=10_000`.
     ///
     /// # Errors
     /// Returns an error if `CONTRACT_ID` is missing, or if `START_LEDGER` /
-    /// `POLL_INTERVAL_SECS` are set but fail to parse as integers.
+    /// `POLL_INTERVAL_SECS` / `MAX_EVENTS_PER_POLL` are set but fail to parse
+    /// as integers.
     pub fn from_env() -> crate::error::Result<Self> {
         use crate::error::IndexerError;
 
@@ -182,12 +185,20 @@ impl IndexerConfig {
             Err(_) => PollInterval::default(),
         };
 
+        let max_events_per_poll = match std::env::var("MAX_EVENTS_PER_POLL") {
+            Ok(value) => value.parse::<u32>().map_err(|e| {
+                IndexerError::Config(format!("invalid MAX_EVENTS_PER_POLL ({value:?}): {e}"))
+            })?,
+            Err(_) => 100,
+        }
+        .clamp(1, 10_000);
+
         Ok(IndexerConfig {
             contract_id,
             network,
             start_ledger,
             poll_interval,
-            max_events_per_poll: 100,
+            max_events_per_poll,
         })
     }
 }
@@ -202,6 +213,7 @@ mod from_env_tests {
         std::env::remove_var("STELLAR_NETWORK");
         std::env::remove_var("START_LEDGER");
         std::env::remove_var("POLL_INTERVAL_SECS");
+        std::env::remove_var("MAX_EVENTS_PER_POLL");
     }
 
     #[test]
@@ -244,6 +256,57 @@ mod from_env_tests {
         clear_env();
         let result = IndexerConfig::from_env();
         assert!(result.is_err());
+        clear_env();
+    }
+
+    #[test]
+    #[serial]
+    fn max_events_per_poll_defaults_to_100() {
+        clear_env();
+        std::env::set_var("CONTRACT_ID", "CTESTCONTRACTID");
+
+        let config = IndexerConfig::from_env().expect("should build config");
+        assert_eq!(config.max_events_per_poll, 100);
+
+        clear_env();
+    }
+
+    #[test]
+    #[serial]
+    fn max_events_per_poll_reads_from_env() {
+        clear_env();
+        std::env::set_var("CONTRACT_ID", "CTESTCONTRACTID");
+        std::env::set_var("MAX_EVENTS_PER_POLL", "500");
+
+        let config = IndexerConfig::from_env().expect("should build config");
+        assert_eq!(config.max_events_per_poll, 500);
+
+        clear_env();
+    }
+
+    #[test]
+    #[serial]
+    fn max_events_per_poll_clamps_out_of_range_values() {
+        clear_env();
+        std::env::set_var("CONTRACT_ID", "CTESTCONTRACTID");
+        std::env::set_var("MAX_EVENTS_PER_POLL", "999999");
+
+        let config = IndexerConfig::from_env().expect("should build config");
+        assert_eq!(config.max_events_per_poll, 10_000);
+
+        clear_env();
+    }
+
+    #[test]
+    #[serial]
+    fn max_events_per_poll_errors_on_invalid_value() {
+        clear_env();
+        std::env::set_var("CONTRACT_ID", "CTESTCONTRACTID");
+        std::env::set_var("MAX_EVENTS_PER_POLL", "not-a-number");
+
+        let result = IndexerConfig::from_env();
+        assert!(result.is_err());
+
         clear_env();
     }
 }
