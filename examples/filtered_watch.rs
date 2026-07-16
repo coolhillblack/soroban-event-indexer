@@ -24,5 +24,7 @@ fn main() -> anyhow::Result<()> {
                 event.value.display()
             );
             Ok(())
-        })
+        })?;
+
+    Ok(())
 }
