@@ -85,24 +85,6 @@ mod cli {
                     url => Network::Custom(url.to_string()),
                 };
 
-                let mut config = IndexerConfig::new(&contract)
-                    .network(net)
-                    .poll_interval_secs(poll)
-                    .max_events_per_poll(100);
-
-                if let Some(ledger) = from {
-                    config = config.start_ledger(ledger);
-                }
-
-                let mut indexer = EventIndexer::new(config);
-
-                if let Some(name) = topic {
-                    indexer = indexer.with_filter(EventFilter::new().topic(name));
-                }
-
-                println!("Watching contract: {contract}");
-                println!("Press Ctrl+C to stop.\n");
-
                 #[cfg(feature = "sqlite")]
                 let db_storage = if let Some(path) = db {
                     use soroban_event_indexer::storage::sqlite::SqliteStorage;
@@ -113,6 +95,33 @@ mod cli {
                 } else {
                     None
                 };
+
+                let mut config = IndexerConfig::new(&contract)
+                    .network(net)
+                    .poll_interval_secs(poll)
+                    .max_events_per_poll(100);
+
+                if let Some(ledger) = from {
+                    // Explicit --from always wins over anything stored.
+                    config = config.start_ledger(ledger);
+                } else {
+                    #[cfg(feature = "sqlite")]
+                    if let Some(ref storage) = db_storage {
+                        if let Some(resume_ledger) = storage.latest_ledger()? {
+                            println!("Resuming from ledger {resume_ledger} (last indexed in database)");
+                            config = config.start_ledger(resume_ledger);
+                        }
+                    }
+                }
+
+                let mut indexer = EventIndexer::new(config);
+
+                if let Some(name) = topic {
+                    indexer = indexer.with_filter(EventFilter::new().topic(name));
+                }
+
+                println!("Watching contract: {contract}");
+                println!("Press Ctrl+C to stop.\n");
 
                 indexer.watch(move |event| {
                     println!(
